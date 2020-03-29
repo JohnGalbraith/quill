@@ -96,7 +96,7 @@ set(SOURCE_FILES
         )
 
 # Add as a library
-add_library(${TARGET_NAME} STATIC "")
+add_library(${TARGET_NAME} SHARED "")
 
 add_library(${TARGET_NAME}::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
