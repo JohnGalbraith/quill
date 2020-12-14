@@ -2,11 +2,14 @@
 #include "quill/QuillError.h"
 #include "quill/detail/misc/Macros.h"
 #include "quill/detail/misc/Utilities.h"
+#include <array>
 #include <cerrno> // for errno, EINVAL, ENOMEM
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring> // for strerror
+#include <cstring>
+#include <ctime>
 #include <sstream>
 
 #if defined(_WIN32)
@@ -32,6 +35,11 @@
   #include <sys/sysctl.h>
   #include <sys/types.h>
   #include <unistd.h>
+#elif defined(__CYGWIN__)
+  #include <sched.h>
+  #include <sys/mman.h>
+  #include <sys/stat.h>
+  #include <unistd.h>
 #elif defined(__linux__)
   #include <sched.h>
   #include <sys/mman.h>
@@ -39,23 +47,6 @@
   #include <sys/stat.h>
   #include <syscall.h>
   #include <unistd.h>
-
-  /**
-   * Detect if _MAP_POPULATE is available for mmap
-   */
-  #include <linux/version.h>
-  #if LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 22)
-    #define _MAP_POPULATE_AVAILABLE
-  #endif
-#endif
-
-/**
- * MMAP Flags for linux/Macos only
- */
-#ifdef _MAP_POPULATE_AVAILABLE
-  #define MMAP_FLAGS (MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE)
-#else
-  #define MMAP_FLAGS (MAP_PRIVATE | MAP_ANONYMOUS)
 #endif
 
 namespace quill
@@ -71,7 +62,8 @@ tm* gmtime_rs(time_t const* timer, tm* buf)
   if (res)
   {
     std::ostringstream error_msg;
-    error_msg << "failed to call gmtime_rs, with error message " << "errno : \"" << res << "\"";
+    error_msg << "failed to call gmtime_rs, with error message "
+              << "errno : \"" << res << "\"";
     QUILL_THROW(QuillError{error_msg.str()});
   }
   return buf;
@@ -96,7 +88,8 @@ tm* localtime_rs(time_t const* timer, tm* buf)
   if (res)
   {
     std::ostringstream error_msg;
-    error_msg << "failed to call localtime_rs, with error message " << "errno: \"" << errno << "\"";
+    error_msg << "failed to call localtime_rs, with error message "
+              << "errno: \"" << errno << "\"";
     QUILL_THROW(QuillError{error_msg.str()});
   }
   return buf;
@@ -116,7 +109,9 @@ tm* localtime_rs(time_t const* timer, tm* buf)
 /***/
 void set_cpu_affinity(uint16_t cpu_id)
 {
-#if defined(_WIN32)
+#if defined(__CYGWIN__)
+  // setting cpu affinity on cygwin is not supported
+#elif defined(_WIN32)
   // core number starts from 0
   auto mask = (static_cast<DWORD_PTR>(1) << cpu_id);
   auto ret = SetThreadAffinityMask(GetCurrentThread(), mask);
@@ -159,7 +154,9 @@ void set_cpu_affinity(uint16_t cpu_id)
 /***/
 void set_thread_name(char const* name)
 {
-#if defined(__MINGW32__) || defined(__MINGW64__)
+#if defined(__CYGWIN__)
+  // set thread name on cygwin not supported
+#elif defined(__MINGW32__) || defined(__MINGW64__)
   // Disabled on MINGW.
   (void)name;
 #elif defined(_WIN32)
@@ -192,7 +189,10 @@ void set_thread_name(char const* name)
 /***/
 uint32_t get_thread_id() noexcept
 {
-#if defined(_WIN32)
+#if defined(__CYGWIN__)
+  // get thread id on cygwin not supported
+  return 0;
+#elif defined(_WIN32)
   return static_cast<uint32_t>(GetCurrentThreadId());
 #elif defined(__linux__)
   return static_cast<uint32_t>(::syscall(SYS_gettid));
@@ -206,7 +206,10 @@ uint32_t get_thread_id() noexcept
 /***/
 uint32_t get_process_id() noexcept
 {
-#if defined(_WIN32)
+#if defined(__CYGWIN__)
+  // get pid on cygwin not supported
+  return 0;
+#elif defined(_WIN32)
   return static_cast<uint32_t>(GetCurrentProcessId());
 #else
   return static_cast<uint32_t>(getpid());
@@ -218,7 +221,9 @@ size_t get_page_size() noexcept
 {
   // thread local to avoid race condition when more than one threads are creating the queue at the same time
   static thread_local uint32_t page_size{0};
-#if defined(_WIN32)
+#if defined(__CYGWIN__)
+  page_size = 4096;
+#elif defined(_WIN32)
   SYSTEM_INFO system_info;
   GetSystemInfo(&system_info);
   page_size = std::max(system_info.dwPageSize, system_info.dwAllocationGranularity);
@@ -229,30 +234,20 @@ size_t get_page_size() noexcept
 }
 
 /***/
-void madvice(void* addr, size_t len)
-{
-#if defined(_WIN32)
-  // Nothing to do on windows, silence the warning
-  (void)addr;
-  (void)len;
-#else
-  // It looks like madvice hint has no effect but we do it anyway ..
-  auto const res = madvise(addr, len, MADV_SEQUENTIAL);
-  if (res == -1)
-  {
-    std::ostringstream error_msg;
-    error_msg << "failed to call madvice, with error message "
-              << "\"" << strerror(res) << "\", errno \"" << res << "\"";
-    QUILL_THROW(QuillError{error_msg.str()});
-  }
-#endif
-}
-
-/***/
 void* aligned_alloc(size_t alignment, size_t size)
 {
 #if defined(_WIN32)
-  return _aligned_malloc(size, alignment);
+  void* p = _aligned_malloc(size, alignment);
+
+  if (!p)
+  {
+    std::ostringstream error_msg;
+    error_msg << "aligned_alloc failed with error message "
+              << "\", errno \"" << errno << "\"";
+    QUILL_THROW(QuillError{error_msg.str()});
+  }
+
+  return p;
 #else
   void* ret = nullptr;
 
@@ -272,10 +267,10 @@ void* aligned_alloc(size_t alignment, size_t size)
 /***/
 void aligned_free(void* ptr) noexcept
 {
-#ifdef WIN32
-  return _aligned_free(ptr);
+#if defined(_WIN32)
+  _aligned_free(ptr);
 #else
-  return free(ptr);
+  free(ptr);
 #endif
 }
 
@@ -340,6 +335,88 @@ int remove(filename_t const& filename) noexcept
 #endif
 }
 
+/***/
+void rename(filename_t const& previous_file, filename_t const& new_file)
+{
+#if defined(_WIN32)
+  int const res = ::_wrename(previous_file.c_str(), new_file.c_str());
+#else
+  int const res = std::rename(previous_file.c_str(), new_file.c_str());
+#endif
+
+  if (QUILL_UNLIKELY(res != 0))
+  {
+    std::ostringstream error_msg;
+    error_msg << "failed to rename previous log file during rotation, with error message errno: \""
+              << errno << "\"";
+    QUILL_THROW(QuillError{error_msg.str()});
+  }
+}
+
+/***/
+time_t timegm(tm* tm)
+{
+#if defined(_WIN32)
+  time_t const ret_val = ::_mkgmtime(tm);
+
+  if (QUILL_UNLIKELY(ret_val == -1))
+  {
+    QUILL_THROW(QuillError{"_mkgmtime failed."});
+  }
+
+  return ret_val;
+#else
+  time_t const ret_val = ::timegm(tm);
+
+  if (QUILL_UNLIKELY(ret_val == (time_t)-1))
+  {
+    QUILL_THROW(QuillError{"timegm failed."});
+  }
+
+  return ret_val;
+#endif
+}
+
+/***/
+bool is_colour_terminal() noexcept
+{
+#if defined(_WIN32)
+  return true;
+#else
+  // Get term from env
+  auto* env_p = std::getenv("TERM");
+
+  if (env_p == nullptr)
+  {
+    return false;
+  }
+
+  static constexpr std::array<char const*, 14> terms = {
+    {"ansi", "color", "console", "cygwin", "gnome", "konsole", "kterm", "linux", "msys", "putty",
+     "rxvt", "screen", "vt100", "xterm"}};
+
+  return std::any_of(terms.begin(), terms.end(),
+                     [&](char const* term) { return std::strstr(env_p, term) != nullptr; });
+#endif
+}
+
+/***/
+bool is_in_terminal(FILE* file) noexcept
+{
+#if defined(_WIN32)
+  bool const is_atty = ::_isatty(_fileno(file)) != 0;
+
+  // ::GetConsoleMode() should return 0 if file is redirected or does not point to the actual console
+  DWORD console_mode;
+  bool const is_console =
+    ::GetConsoleMode(reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(file))), &console_mode) != 0;
+
+  return is_atty && is_console;
+#else
+  return ::isatty(fileno(file)) != 0;
+#endif
+}
+
 #if defined(_WIN32)
 /***/
 void wstring_to_utf8(fmt::wmemory_buffer const& w_mem_buffer, fmt::memory_buffer& mem_buffer)
@@ -380,220 +457,6 @@ void wstring_to_utf8(fmt::wmemory_buffer const& w_mem_buffer, fmt::memory_buffer
   mem_buffer.resize(static_cast<uint32_t>(bytes_needed + mem_buffer.size()));
 }
 #endif
-
-/***/
-std::pair<unsigned char*, void*> create_memory_mapped_files(size_t capacity)
-{
-  if (!is_pow_of_two(capacity))
-  {
-    QUILL_THROW(QuillError{"capacity needs to be power of two"});
-  }
-
-  if (capacity % get_page_size() != 0)
-  {
-    QUILL_THROW(QuillError{"capacity needs to be multiple of page size"});
-  }
-
-#if defined(_WIN32)
-  HANDLE hMapFile = CreateFileMapping(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
-                                      static_cast<DWORD>(capacity * 2), NULL);
-
-  if (!hMapFile)
-  {
-    auto const error = std::error_code(GetLastError(), std::system_category());
-    std::ostringstream error_msg;
-    error_msg << "create_memory_mapped_files failed with error message "
-              << "\"" << error.message() << "\", errno \"" << error.value() << "\"";
-    QUILL_THROW(QuillError{error_msg.str()});
-  }
-
-  for (;;)
-  {
-    // find a free address space with the correct size
-    auto address =
-      static_cast<unsigned char*>(MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, capacity * 2));
-
-    if (!address)
-    {
-      CloseHandle(hMapFile);
-      auto const error = std::error_code(GetLastError(), std::system_category());
-      std::ostringstream error_msg;
-      error_msg << "create_memory_mapped_files failed with error message "
-                << "\"" << error.message() << "\", errno \"" << error.value() << "\"";
-      QUILL_THROW(QuillError{error_msg.str()});
-    }
-
-    // found a big enough address space. hopefully it will remain free while we map to it. if not,
-    // we'll try again.
-    UnmapViewOfFile(address);
-
-    auto addr1 =
-      static_cast<unsigned char*>(MapViewOfFileEx(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, capacity, address));
-
-    if (addr1 != address)
-    {
-      // Try again if it did not remain free
-      DWORD err = GetLastError();
-      if (err == ERROR_INVALID_ADDRESS)
-      {
-        continue;
-      }
-      else
-      {
-        CloseHandle(hMapFile);
-        auto const error = std::error_code(GetLastError(), std::system_category());
-        std::ostringstream error_msg;
-        error_msg << "create_memory_mapped_files failed with error message "
-                  << "\"" << error.message() << "\", errno \"" << error.value() << "\"";
-        QUILL_THROW(QuillError{error_msg.str()});
-      }
-    }
-
-    auto addr2 = static_cast<unsigned char*>(
-      MapViewOfFileEx(hMapFile, FILE_MAP_WRITE, 0, 0, capacity, address + capacity));
-
-    if (addr2 != address + capacity)
-    {
-      // We will try again but first unmap the previous mapped file
-      UnmapViewOfFile(addr1);
-
-      DWORD err = GetLastError();
-      if (err == ERROR_INVALID_ADDRESS)
-      {
-        continue;
-      }
-      else
-      {
-        CloseHandle(hMapFile);
-        auto const error = std::error_code(GetLastError(), std::system_category());
-        std::ostringstream error_msg;
-        error_msg << "create_memory_mapped_files failed with error message "
-                  << "\"" << error.message() << "\", errno \"" << error.value() << "\"";
-        QUILL_THROW(QuillError{error_msg.str()});
-      }
-    }
-
-    // All okay
-    return std::pair<unsigned char*, void*>{address, hMapFile};
-  }
-#else
-  char shm_path[] = "/dev/shm/quill-XXXXXX";
-  char tmp_path[] = "/tmp/quill-XXXXXX";
-  char const* chosen_path{nullptr};
-
-  // Try to open an fd by creating a unique file in one of the above locations
-  int fd = mkstemp(shm_path);
-
-  if (fd < 0)
-  {
-    // if we failed try the tmp path
-    fd = mkstemp(tmp_path);
-
-    if (fd < 0)
-    {
-      // failed to get the file size
-      std::ostringstream error_msg;
-      error_msg << "create_memory_mapped_files failed with error message "
-                << "\"" << strerror(errno) << "\", errno \"" << errno << "\"";
-      QUILL_THROW(QuillError{error_msg.str()});
-    }
-
-    chosen_path = tmp_path;
-  }
-  else
-  {
-    chosen_path = shm_path;
-  }
-
-  // Delete the file as we only want the fd
-  if (unlink(chosen_path) == -1)
-  {
-    std::ostringstream error_msg;
-    error_msg << "create_memory_mapped_files failed with error message "
-              << "\"" << strerror(errno) << "\", errno \"" << errno << "\"";
-    QUILL_THROW(QuillError{error_msg.str()});
-  }
-
-  if (ftruncate(fd, static_cast<off_t>(capacity)) == -1)
-  {
-    close(fd);
-    std::ostringstream error_msg;
-    error_msg << "create_memory_mapped_files failed with error message "
-              << "\"" << strerror(errno) << "\", errno \"" << errno << "\"";
-    QUILL_THROW(QuillError{error_msg.str()});
-  }
-
-  // ask mmap for a good address where we can put both virtual copies of the buffer
-  auto address = static_cast<unsigned char*>(mmap(nullptr, 2 * capacity, PROT_NONE, MMAP_FLAGS, -1, 0));
-
-  if (address == MAP_FAILED)
-  {
-    close(fd);
-    std::ostringstream error_msg;
-    error_msg << "create_memory_mapped_files failed with error message "
-              << "\"" << strerror(errno) << "\", errno \"" << errno << "\"";
-    QUILL_THROW(QuillError{error_msg.str()});
-  }
-
-  // map first region
-  auto other_address = static_cast<unsigned char*>(
-    mmap(address, capacity, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, 0));
-
-  if (other_address != address)
-  {
-    munmap(address, 2 * capacity);
-    close(fd);
-    std::ostringstream error_msg;
-    error_msg << "create_memory_mapped_files failed with error message "
-              << "\"" << strerror(errno) << "\", errno \"" << errno << "\"";
-    QUILL_THROW(QuillError{error_msg.str()});
-  }
-
-  // map second region
-  other_address = static_cast<unsigned char*>(
-    mmap(address + capacity, capacity, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, 0));
-
-  if (other_address != address + capacity)
-  {
-    munmap(address, 2 * capacity);
-    close(fd);
-    std::ostringstream error_msg;
-    error_msg << "create_memory_mapped_files failed with error message "
-              << "\"" << strerror(errno) << "\", errno \"" << errno << "\"";
-    QUILL_THROW(QuillError{error_msg.str()});
-  }
-
-  // we don't need the fd any longer
-  if (close(fd) == -1)
-  {
-    munmap(address, 2 * capacity);
-    std::ostringstream error_msg;
-    error_msg << "create_memory_mapped_files failed with error message "
-              << "\"" << strerror(errno) << "\", errno \"" << errno << "\"";
-    QUILL_THROW(QuillError{error_msg.str()});
-  }
-
-  // All okay
-  return std::pair<unsigned char*, void*>{address, nullptr};
-#endif
-}
-
-/***/
-void destroy_memory_mapped_files(std::pair<unsigned char*, void*> pointer_pair, size_t capacity)
-{
-  if (!pointer_pair.first)
-  {
-    return;
-  }
-
-#if defined(_WIN32)
-  UnmapViewOfFile(pointer_pair.first);
-  UnmapViewOfFile(pointer_pair.first + capacity);
-  CloseHandle(reinterpret_cast<HANDLE>(pointer_pair.second));
-#else
-  munmap(pointer_pair.first, 2 * capacity);
-#endif
-}
 
 } // namespace detail
 } // namespace quill

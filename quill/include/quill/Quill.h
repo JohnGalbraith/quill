@@ -7,17 +7,18 @@
 
 #include "quill/TweakMe.h"
 
-#include "quill/detail/BackendWorker.h"       // for backend_worker_error_h...
-#include "quill/detail/LogMacros.h"           // for filename_t
-#include "quill/detail/LogManager.h"          // for LogManager
-#include "quill/detail/LogManagerSingleton.h" // for LogManagerSingleton
-#include "quill/detail/misc/Attributes.h"     // for QUILL_ATTRIBUTE_COLD
-#include "quill/handlers/FileHandler.h"       // for FilenameAppend, Filena...
-#include <chrono>                             // for hours, minutes, nanose...
-#include <cstddef>                            // for size_t
-#include <cstdint>                            // for uint16_t
-#include <initializer_list>                   // for initializer_list
-#include <string>                             // for string
+#include "quill/detail/LogMacros.h"             // for filename_t
+#include "quill/detail/LogManager.h"            // for LogManager
+#include "quill/detail/LogManagerSingleton.h"   // for LogManagerSingleton
+#include "quill/detail/backend/BackendWorker.h" // for backend_worker_error_h...
+#include "quill/detail/misc/Attributes.h"       // for QUILL_ATTRIBUTE_COLD
+#include "quill/detail/misc/Common.h"           // for Timezone
+#include "quill/handlers/FileHandler.h"         // for FilenameAppend, Filena...
+#include <chrono>                               // for hours, minutes, nanose...
+#include <cstddef>                              // for size_t
+#include <cstdint>                              // for uint16_t
+#include <initializer_list>                     // for initializer_list
+#include <string>                               // for string
 
 namespace quill
 {
@@ -37,26 +38,77 @@ QUILL_ATTRIBUTE_COLD void preallocate();
  * Starts the backend thread to write the logs to the handlers.
  * This function is protected with a std::call_once flag, it can only be called once.
  * Blocks the caller thread until the backend worker thread starts spinning.
+ *
+ * @param with_signal_handler Initialises a signal handler (or exception handler and Ctrl-C on Windows)
+ *                            that will catch signals and flush the log before the application crashes
+ *
+ * @param catchable_signals List of the signals that the signal handler will catch (Posix ONLY).
+ *
+ * @note On Windows regardless the value of `with_signal_handler` init_signal_handler
+ * can also be called on each new caller thread. @see init_signal_handler
+ * - with_signal_handler=true will set up an exception handler and a Ctrl-C on windows to handle windows exception.
+ * - init_signal_handler() on Windows will setup a signal handler that will handle posix style signals.
+ * To fully handle signals on windows use with_signal_handler=true and also call init_signal_handler()
+ * on each thread.
+ *
  * @throws When the backend thread fails to start
  */
-QUILL_ATTRIBUTE_COLD inline void start()
+QUILL_ATTRIBUTE_COLD inline void start(bool with_signal_handler = false,
+                                       std::initializer_list<int> catchable_signals = {
+                                         SIGTERM, SIGINT, SIGABRT, SIGFPE, SIGILL, SIGSEGV})
 {
-  detail::LogManagerSingleton::instance().log_manager().start_backend_worker();
+  detail::LogManagerSingleton::instance().log_manager().start_backend_worker(with_signal_handler, catchable_signals);
 }
 
+#if defined(_WIN32)
 /**
- * @param stdout_handler_name a custom name for stdout_handler. This is only useful if you want to
- * have multiple formats in the stdout. See example_stdout_multiple_formatters.cpp example
- * @return a handler to the standard output stream
+ * Setups up a signal handler for the caller thread. This must be called by each new thread
+ * on windows. On linux this is called automatically on quill::start().
+ * When init_signal_handler() is not called on windows, the windows exception will be catched
+ * instead if start() was called with_signal_handler = true
+ * @param catchable_signals List of the signals that the signal handler will catch
  */
-QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* stdout_handler(std::string const& stdout_handler_name = std::string{"stdout"});
+QUILL_ATTRIBUTE_COLD inline void init_signal_handler(std::initializer_list<int> catchable_signals = {
+                                                       SIGTERM, SIGINT, SIGABRT, SIGFPE, SIGILL, SIGSEGV})
+{
+  quill::detail::init_signal_handler(catchable_signals);
+}
+#endif
 
 /**
  * @param stdout_handler_name a custom name for stdout_handler. This is only useful if you want to
  * have multiple formats in the stdout. See example_stdout_multiple_formatters.cpp example
+ *  @param console_colours a console colours configuration class
+ * @return a handler to the standard output stream
+ */
+QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* stdout_handler(
+  std::string const& stdout_handler_name = std::string{"stdout"},
+  ConsoleColours const& console_colours = ConsoleColours{});
+
+/**
+ * @param stderr_handler_name a custom name for stdout_handler. This is only useful if you want to
+ * have multiple formats in the stderr. See example_stdout_multiple_formatters.cpp example
  * @return a handler to the standard error stream
  */
-QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* stderr_handler(std::string const& stdout_handler_name = std::string{"stderr"});
+QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* stderr_handler(std::string const& stderr_handler_name = std::string{"stderr"});
+
+/**
+ * Creates new handler and registers it internally.
+ * This can be also used for creating custom handlers.
+ * If a handler is already registered under the same name the existing handler is returned and
+ * no new handler is created.
+ * @tparam THandler type of the handler
+ * @tparam Args the handler's constructor arguments types
+ * @param handler_name the name of the handler
+ * @param args the handler's constructor arguments, excluding the file name
+ * @return A pointer to a new or existing handler
+ */
+template <typename THandler, typename... Args>
+QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* create_handler(filename_t const& handler_name, Args&&... args)
+{
+  return detail::LogManagerSingleton::instance().log_manager().handler_collection().create_handler<THandler>(
+    handler_name, std::forward<Args>(args)...);
+}
 
 /**
  * Creates or returns an existing handler to a file.
@@ -68,48 +120,104 @@ QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* stderr_handler(std::string const& 
  * @return A handler to a file
  */
 QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* file_handler(filename_t const& filename,
-                                                           std::string const& mode = std::string{},
+                                                           std::string const& mode = std::string{"a"},
                                                            FilenameAppend append_to_filename = FilenameAppend::None);
 
 /**
- * Creates or returns an existing handler to a daily file handler
- * The handler will rotate creating a new log file after 24 hours based on the given rotation_hour and rotation_minute
- * @param base_filename the base filename, current date is automatically appended to this
- * @param rotation_hour The hour to perform the rotation
- * @param rotation_minute The minute to perform the rotation
- * @return A handler to a daily file
+ * Creates a new instance of the TimeRotatingFileHandler class or looks up an existing instance.
+ *
+ * The specified file is opened and used as the stream for logging. Rotating happens based on
+ * the product of when and interval. You can use the when to specify the type of interval.
+ * When 'daily' is passed, the value passed for interval isn’t used.
+ *
+ * The system will save old log files by appending extensions to the filename. The extensions are
+ * date-and-time based in the format of '%Y-%m-%d_%H-%M-%S'.
+ *
+ * If the timezone argument is gmt time, times in UTC will be used; otherwise local time is used
+ *
+ * At most backup_count files will be kept, and if more would be created when rollover occurs, the oldest one is deleted.
+ *
+ * at_time specifies the time of day when rollover occurs and only used when 'daily' is passed. It must be in the format HH:MM
+ *
+ * @param base_filename the filename
+ * @param mode mode to open the file 'a' or 'w'
+ * @param when 'M' for minutes, 'H' for hours or 'daily'
+ * @param interval The interval used for rotation.
+ * @param backup_count maximum backup files to keep
+ * @param timezone if true times in UTC will be used; otherwise local time is used
+ * @param at_time specifies the time of day when rollover occurs if 'daily' is passed
+ * @return a pointer to a time rotating file handler
  */
-QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* daily_file_handler(filename_t const& base_filename,
-                                                                 std::chrono::hours rotation_hour,
-                                                                 std::chrono::minutes rotation_minute);
+QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* time_rotating_file_handler(
+  filename_t const& base_filename, std::string const& mode = std::string{"a"},
+  std::string const& when = std::string{"H"}, uint32_t interval = 1, uint32_t backup_count = 0,
+  Timezone timezone = Timezone::LocalTime, std::string const& at_time = std::string{"00:00"});
 
 /**
- * Creates or returns an existing handler to a rotating file handler
- * The handler will rotate creating a new log file after the file has reached max_bytes
- * @param base_filename Base file name
- * @param max_bytes Maximum file size in bytes
- * @return A handler to a rotating log file
+ * Creates a new instance of the RotatingFileHandler class or looks up an existing instance.
+ *
+ * If a rotating file handler with base_filename exists then the existing instance is returned.
+ *
+ * If a rotating file handler does not exist then the specified file is opened and used as the stream for logging.
+ * By default, the file grows indefinitely. You can use the max_bytes and backup_count values to allow
+ * the file to rollover at a predetermined size.
+ * When the size is about to be exceeded, the file is closed and a new file is silently opened for output.
+ *
+ * Rollover occurs whenever the current log file is nearly max_bytes in length;
+ * but if either of max_bytes or backup_count is zero, rollover never occurs,
+ * so you generally want to set backup_count to at least 1, and have a non-zero maxBytes.
+ *
+ * When backup_count is non-zero, the system will save old log files by appending the
+ * extensions ‘.1’, ‘.2’ etc., to the filename.
+ *
+ * For example, with a backup_count of 5 and a base file name of app.log,
+ * you would get app.log, app.1.log, app.2.log, up to app.5.log
+ * The file being written to is always app.log.
+ * When this file is filled, it is closed and renamed to app.1.log, and if files
+ * app.1.log, app.2.log, etc. exist, then they are renamed to app.2.log, app.3.log etc. respectively.
+ *
+ * @param base_filename the base file name
+ * @param mode file mode to open file
+ * @param max_bytes The max_bytes of the file, when the size is exceeded the file witll rollover
+ * @param backup_count The maximum number of times we want to rollover
+ * @return a pointer to a rotating file handler
  */
 QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* rotating_file_handler(filename_t const& base_filename,
-                                                                    size_t max_bytes);
+                                                                    std::string const& mode = std::string{"a"},
+                                                                    size_t max_bytes = 0,
+                                                                    uint32_t backup_count = 0);
 
 #if defined(_WIN32)
 /**
- * On windows filename_t always defaults to std::wstring so we provide another overload for std::string
- * Converts a std::string to std::wstring. All filesnames on windows are opened as wide strings
- * @param filename the name of the file
- * @param mode Used only when the file is opened for the first time. Otherwise the value is ignored
+ * @see create_handler
+ */
+template <typename THandler, typename... Args>
+QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* create_handler(std::string const& handler_name, Args&&... args)
+{
+  return create_handler<THandler>(detail::s2ws(handler_name), std::forward<Args>(args)...);
+}
+
+/**
+ * @see file_handler
  */
 QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* file_handler(std::string const& filename,
-                                                           std::string const& mode = std::string{},
+                                                           std::string const& mode = std::string{"a"},
                                                            FilenameAppend append_to_filename = FilenameAppend::None);
+/**
+ * @see time_rotating_file_handler
+ */
+QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* time_rotating_file_handler(
+  std::string const& base_filename, std::string const& mode = std::string{"a"},
+  std::string const& when = std::string{"H"}, uint32_t interval = 1, uint32_t backup_count = 0,
+  Timezone timezone = Timezone::LocalTime, std::string const& at_time = std::string{"00:00"});
 
-QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* daily_file_handler(std::string const& base_filename,
-                                                                 std::chrono::hours rotation_hour,
-                                                                 std::chrono::minutes rotation_minute);
-
+/**
+ * @see rotating_file_handler
+ */
 QUILL_NODISCARD QUILL_ATTRIBUTE_COLD Handler* rotating_file_handler(std::string const& base_filename,
-                                                                    size_t max_bytes);
+                                                                    std::string const& mode = std::string{"a"},
+                                                                    size_t max_bytes = 0,
+                                                                    uint32_t backup_count = 0);
 #endif
 
 /**
@@ -193,6 +301,11 @@ QUILL_ATTRIBUTE_COLD void set_default_logger_handler(Handler* handler);
 QUILL_ATTRIBUTE_COLD void set_default_logger_handler(std::initializer_list<Handler*> handlers);
 
 /**
+ * If called then by default we are printing colour codes when console/terminal is used
+ */
+QUILL_ATTRIBUTE_COLD void enable_console_colours();
+
+/**
  * Blocks the caller thread until all log messages up to the current timestamp are flushed
  *
  * The backend thread will call write on all handlers for all loggers up to the point (timestamp)
@@ -243,7 +356,7 @@ namespace config
  *
  * @cpu the cpu core to pin the backend thread
  */
-QUILL_ATTRIBUTE_COLD void set_backend_thread_cpu_affinity(uint16_t cpu) noexcept;
+QUILL_ATTRIBUTE_COLD void set_backend_thread_cpu_affinity(uint16_t cpu);
 
 /**
  * Names the backend thread
@@ -255,13 +368,13 @@ QUILL_ATTRIBUTE_COLD void set_backend_thread_cpu_affinity(uint16_t cpu) noexcept
  *
  * @param name The desired name of the backend worker thread
  */
-QUILL_ATTRIBUTE_COLD void set_backend_thread_name(std::string const& name) noexcept;
+QUILL_ATTRIBUTE_COLD void set_backend_thread_name(std::string const& name);
 
 /**
  * The backend thread will always "busy wait" spinning around every caller thread's local spsc queue.
  *
  * The reason for this is to reduce latency on the caller thread as notifying the
- * backend thread even by a fast backed by atomics semaphone would add additional latency
+ * backend thread even by a fast backed by atomics semaphore would add additional latency
  * to the caller thread.
  * The alternative to this is letting the backend thread "busy wait" and at the same time reduce the backend thread's
  * OS scheduler priority by a periodic call to sleep().
@@ -280,8 +393,7 @@ QUILL_ATTRIBUTE_COLD void set_backend_thread_name(std::string const& name) noexc
  *
  * @param sleep_duration The sleep duration of the backend thread when idle
  */
-QUILL_ATTRIBUTE_COLD void set_backend_thread_sleep_duration(std::chrono::nanoseconds sleep_duration) noexcept;
-
+QUILL_ATTRIBUTE_COLD void set_backend_thread_sleep_duration(std::chrono::nanoseconds sleep_duration);
 } // namespace config
 
 } // namespace quill

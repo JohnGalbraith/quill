@@ -7,14 +7,14 @@
 
 #include "quill/TweakMe.h"
 
-#include "quill/detail/BackendWorker.h"
 #include "quill/detail/Config.h"
 #include "quill/detail/HandlerCollection.h"
 #include "quill/detail/LoggerCollection.h"
+#include "quill/detail/SignalHandler.h" // for init_signal_handler
 #include "quill/detail/ThreadContextCollection.h"
-
+#include "quill/detail/backend/BackendWorker.h"
+#include "quill/detail/events/FlushEvent.h"
 #include "quill/detail/misc/Spinlock.h"
-#include "quill/detail/record/CommandRecord.h"
 
 namespace quill
 {
@@ -66,7 +66,15 @@ public:
   /**
    * @return The current process id
    */
-  QUILL_NODISCARD std::string const& process_id() noexcept { return _process_id; }
+  QUILL_NODISCARD std::string const& process_id() const noexcept { return _process_id; }
+
+  /**
+   * @return The current process id
+   */
+  QUILL_NODISCARD uint32_t backend_worker_thread_id() const noexcept
+  {
+    return _backend_worker.thread_id();
+  }
 
   /**
    * Blocks the caller thread until all log messages until the current timestamp are flushed
@@ -92,7 +100,7 @@ public:
       backend_thread_flushed.store(true);
     };
 
-    using log_record_t = detail::CommandRecord;
+    using event_t = detail::FlushEvent;
 
 #if defined(QUILL_USE_BOUNDED_QUEUE)
     // emplace to the spsc queue owned by the ctx, we never drop the flush message
@@ -100,10 +108,10 @@ public:
     do
     {
       emplaced =
-        _thread_context_collection.local_thread_context()->spsc_queue().try_emplace<log_record_t>(notify_callback);
+        _thread_context_collection.local_thread_context()->event_spsc_queue().try_emplace<event_t>(notify_callback);
     } while (!emplaced);
 #else
-    _thread_context_collection.local_thread_context()->spsc_queue().emplace<log_record_t>(notify_callback);
+    _thread_context_collection.local_thread_context()->event_spsc_queue().emplace<event_t>(notify_callback);
 #endif
 
     // The caller thread keeps checking the flag until the backend thread flushes
@@ -117,12 +125,57 @@ public:
   /**
    * Starts the backend worker thread.
    */
-  QUILL_ATTRIBUTE_COLD void inline start_backend_worker() { _backend_worker.run(); }
+  QUILL_ATTRIBUTE_COLD void inline start_backend_worker(bool with_signal_handler,
+                                                        std::initializer_list<int> const& catchable_signals)
+  {
+    if (with_signal_handler)
+    {
+#if defined(_WIN32)
+      (void)catchable_signals;
+      init_exception_handler();
+#else
+      // block all signals before spawning the backend worker thread
+      // note: we just assume that std::thread is implemented using posix threads, or this
+      // won't have any effect
+      sigset_t mask;
+      sigfillset(&mask);
+      sigprocmask(SIG_SETMASK, &mask, NULL);
+
+      // Initialise our signal handler
+      init_signal_handler(catchable_signals);
+#endif
+    }
+
+    // Start the backend worker
+    _backend_worker.run();
+
+    if (with_signal_handler)
+    {
+#if defined(_WIN32)
+      // ... ?
+#else
+      // unblock all signals after spawning the thread
+      // note: we just assume that std::thread is implemented using posix threads, or this
+      // won't have any effect
+      sigset_t mask;
+      sigemptyset(&mask);
+      sigprocmask(SIG_SETMASK, &mask, NULL);
+#endif
+    }
+  }
 
   /**
    * Stops the backend worker thread
    */
-  QUILL_ATTRIBUTE_COLD void stop_backend_worker() { _backend_worker.stop(); }
+  QUILL_ATTRIBUTE_COLD void stop_backend_worker() noexcept { _backend_worker.stop(); }
+
+  /**
+   * @return true if backend worker has started
+   */
+  QUILL_NODISCARD QUILL_ATTRIBUTE_COLD bool backend_worker_is_running() noexcept
+  {
+    return _backend_worker.is_running();
+  }
 
 #if !defined(QUILL_NO_EXCEPTIONS)
   /**

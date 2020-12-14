@@ -11,6 +11,17 @@ set(HEADER_FILES
         include/quill/bundled/invoke/invoke.h
 
         # quill
+        include/quill/detail/backend/BackendWorker.h
+        include/quill/detail/backend/BacktraceLogRecordStorage.h
+        include/quill/detail/backend/FreeListAllocator.h
+        include/quill/detail/backend/StringFromTime.h
+        include/quill/detail/backend/TimestampFormatter.h
+
+        include/quill/detail/events/BacktraceEvent.h
+        include/quill/detail/events/BaseEvent.h
+        include/quill/detail/events/FlushEvent.h
+        include/quill/detail/events/LogEvent.h
+
         include/quill/detail/misc/AlignedAllocator.h
         include/quill/detail/misc/Attributes.h
         include/quill/detail/misc/Common.h
@@ -21,15 +32,21 @@ set(HEADER_FILES
         include/quill/detail/misc/RdtscClock.h
         include/quill/detail/misc/RecursiveSpinlock.h
         include/quill/detail/misc/Spinlock.h
-        include/quill/detail/misc/Utilities.h
+        include/quill/detail/misc/StringView.h
         include/quill/detail/misc/TypeTraits.h
         include/quill/detail/misc/TypeTraitsCopyable.h
-        include/quill/detail/record/CommandRecord.h
-        include/quill/detail/record/LogRecord.h
-        include/quill/detail/record/RecordBase.h
-        include/quill/detail/record/LogRecordMetadata.h
-        include/quill/detail/BackendWorker.h
-        include/quill/detail/BoundedSPSCQueue.h
+        include/quill/detail/misc/TypeTraitsSerializable.h
+        include/quill/detail/misc/Utilities.h
+
+        include/quill/detail/serialize/Deserialize.h
+        include/quill/detail/serialize/Serialize.h
+        include/quill/detail/serialize/SerializationMetadata.h
+        include/quill/detail/serialize/TypeDescriptor.h
+
+        include/quill/detail/spsc_queue/BoundedSPSCEventQueue.h
+        include/quill/detail/spsc_queue/BoundedSPSCRawQueue.h
+        include/quill/detail/spsc_queue/UnboundedSPSCEventQueue.h
+
         include/quill/detail/Config.h
         include/quill/detail/HandlerCollection.h
         include/quill/detail/LoggerCollection.h
@@ -39,16 +56,18 @@ set(HEADER_FILES
         include/quill/detail/LogManagerSingleton.h
         include/quill/detail/ThreadContext.h
         include/quill/detail/ThreadContextCollection.h
-        include/quill/detail/TimestampFormatter.h
-        include/quill/detail/UnboundedSPSCQueue.h
-        include/quill/handlers/DailyFileHandler.h
+        include/quill/detail/SignalHandler.h
+        include/quill/filters/FilterBase.h
+        include/quill/handlers/ConsoleHandler.h
         include/quill/handlers/FileHandler.h
         include/quill/handlers/Handler.h
         include/quill/handlers/RotatingFileHandler.h
         include/quill/handlers/StreamHandler.h
+        include/quill/handlers/TimeRotatingFileHandler.h
         include/quill/Fmt.h
         include/quill/Logger.h
         include/quill/LogLevel.h
+        include/quill/LogMacroMetadata.h
         include/quill/PatternFormatter.h
         include/quill/Quill.h
         include/quill/QuillError.h
@@ -59,23 +78,32 @@ set(HEADER_FILES
 
 # source files
 set(SOURCE_FILES
-        src/detail/misc/Utilities.cpp
+        src/detail/backend/BackendWorker.cpp
+        src/detail/backend/BacktraceLogRecordStorage.cpp
+        src/detail/backend/FreeListAllocator.cpp
+        src/detail/backend/TimestampFormatter.cpp
+        src/detail/backend/StringFromTime.cpp
+        src/detail/misc/FileUtilities.cpp
         src/detail/misc/Os.cpp
         src/detail/misc/RdtscClock.cpp
         src/detail/misc/RecursiveSpinlock.cpp
         src/detail/misc/Spinlock.cpp
-        src/detail/misc/FileUtilities.cpp
-        src/detail/BackendWorker.cpp
+        src/detail/misc/Utilities.cpp
         src/detail/Config.cpp
+        src/detail/Deserialize.cpp
         src/detail/HandlerCollection.cpp
         src/detail/LoggerCollection.cpp
         src/detail/LogManagerSingleton.cpp
+        src/detail/SignalHandler.cpp
         src/detail/ThreadContextCollection.cpp
-        src/detail/TimestampFormatter.cpp
-        src/handlers/DailyFileHandler.cpp
+
+        src/handlers/ConsoleHandler.cpp
         src/handlers/FileHandler.cpp
+        src/handlers/Handler.cpp
         src/handlers/RotatingFileHandler.cpp
         src/handlers/StreamHandler.cpp
+        src/handlers/TimeRotatingFileHandler.cpp
+
         src/LogLevel.cpp
         src/PatternFormatter.cpp
         src/Quill.cpp
@@ -103,8 +131,14 @@ if (NOT QUILL_FMT_EXTERNAL)
             src/bundled/fmt/os.cc)
 endif ()
 
+if (BUILD_SHARED_LIBS)
+    set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
+    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+endif ()
+
 # Add as a library
 add_library(${TARGET_NAME} SHARED "")
+# add_library(${TARGET_NAME} "")
 
 add_library(${TARGET_NAME}::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
@@ -156,12 +190,9 @@ target_compile_options(${TARGET_NAME} PRIVATE
         -Wall -Wextra -Wconversion -pedantic -Wfatal-errors -Wno-unused-private-field>
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /wd4324>)
 
-if (MSVC_VERSION GREATER 1900)  #Allow non fatal security warnings for msvc 2015
-    target_compile_options(${TARGET_NAME} PRIVATE /WX)
-endif ()
-
 # TODO:: use MultiByteToWideChar() and WideCharToMultiByte() from <Windows.h> instead of covecvt
 if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(${TARGET_NAME} PRIVATE /WX /EHsc)
     target_compile_definitions(${TARGET_NAME} PRIVATE _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING)
 endif ()
 

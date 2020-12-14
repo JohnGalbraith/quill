@@ -79,8 +79,6 @@ find_package(Threads REQUIRED)
 
 if (QUILL_BUILD_TESTS)
     enable_testing()
-    find_package(GTest REQUIRED)
-    include_directories(${GTEST_INCLUDE_DIRS})
 
     if (QUILL_USE_VALGRIND)
         # find valgrind
@@ -145,7 +143,8 @@ endif ()
 
 # Append extra options for coverage
 if (QUILL_CODE_COVERAGE)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g -fprofile-arcs -ftest-coverage")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-arcs -ftest-coverage")
 endif ()
 
 # Build Examples

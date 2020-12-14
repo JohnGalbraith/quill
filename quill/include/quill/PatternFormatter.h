@@ -5,23 +5,23 @@
 
 #pragma once
 
-#include "quill/Fmt.h"                             // for memory_buffer
-#include "quill/QuillError.h"                      // for QUILL_THROW, Quil...
-#include "quill/bundled/invoke/invoke.h"           // for apply
-#include "quill/detail/TimestampFormatter.h"       // for TimestampFormatter
-#include "quill/detail/misc/Attributes.h"          // for QUILL_NODISCARD
-#include "quill/detail/misc/Common.h"              // for Timezone, Timezon...
-#include "quill/detail/misc/Utilities.h"           // for strlength
-#include "quill/detail/record/LogRecordMetadata.h" // for LogRecordMetadata
-#include <array>                                   // for array
-#include <chrono>                                  // for nanoseconds
-#include <cstddef>                                 // for size_t
-#include <functional>                              // for function
-#include <memory>                                  // for unique_ptr, make_...
-#include <string>                                  // for string
-#include <tuple>                                   // for make_tuple
-#include <utility>                                 // for move, index_sequence
-#include <vector>                                  // for vector
+#include "quill/Fmt.h"                               // for memory_buffer
+#include "quill/LogMacroMetadata.h"                  // for LogMacroMetadata
+#include "quill/QuillError.h"                        // for QUILL_THROW, Quil...
+#include "quill/bundled/invoke/invoke.h"             // for apply
+#include "quill/detail/backend/TimestampFormatter.h" // for TimestampFormatter
+#include "quill/detail/misc/Attributes.h"            // for QUILL_NODISCARD
+#include "quill/detail/misc/Common.h"                // for Timezone, Timezon...
+#include "quill/detail/misc/Utilities.h"             // for strlength
+#include <array>                                     // for array
+#include <chrono>                                    // for nanoseconds
+#include <cstddef>                                   // for size_t
+#include <functional>                                // for function
+#include <memory>                                    // for unique_ptr, make_...
+#include <string>                                    // for string
+#include <tuple>                                     // for make_tuple
+#include <utility>                                   // for move, index_sequence
+#include <vector>                                    // for vector
 
 #if defined(_WIN32)
   #include "quill/detail/misc/Os.h"
@@ -34,11 +34,11 @@
  */
 #define QUILL_STRING(str)                                                                          \
   [] {                                                                                             \
-    using R = union X                                                                              \
+    union X                                                                                        \
     {                                                                                              \
       static constexpr auto value() { return str; }                                                \
     };                                                                                             \
-    return R{};                                                                                    \
+    return X{};                                                                                    \
   }()
 
 namespace quill
@@ -64,7 +64,8 @@ namespace quill
  * fmt.format(log_record)
  * fmt.format(part_3);
  *
- * @note: Default pattern is "%(ascii_time) [%(thread)] %(filename):%(lineno) %(level_name) %(logger_name) - %(message)"
+ * @note: Default pattern is:
+ *     "%(ascii_time) [%(thread)] %(fileline:<28) LOG_%(level_name) %(logger_name:<12) - %(message)"
  */
 class PatternFormatter
 {
@@ -89,7 +90,7 @@ private:
      */
     virtual void format(fmt::memory_buffer& memory_buffer, std::chrono::nanoseconds timestamp,
                         char const* thread_id, char const* logger_name,
-                        detail::LogRecordMetadata const& logline_info) const = 0;
+                        LogMacroMetadata const& logline_info) const = 0;
   };
 
   /**
@@ -113,7 +114,7 @@ private:
      * @param logline_info pointer to the log line info object
      */
     void format(fmt::memory_buffer& memory_buffer, std::chrono::nanoseconds timestamp, char const* thread_id,
-                char const* logger_name, detail::LogRecordMetadata const& logline_info) const override
+                char const* logger_name, LogMacroMetadata const& logline_info) const override
     {
       // lambda expand the stored tuple arguments
       auto format_buffer = [this, &memory_buffer, timestamp, thread_id, logger_name,
@@ -133,7 +134,7 @@ private:
   /** Public classes **/
 public:
   /**
-   * Stores the precission of the timestamp
+   * Stores the precision of the timestamp
    */
   enum class TimestampPrecision : uint8_t
   {
@@ -152,12 +153,12 @@ public:
   {
     // Set the default pattern
     _set_pattern(
-      QUILL_STRING("%(ascii_time) [%(thread)] %(filename):%(lineno) LOG_%(level_name) "
-                   "%(logger_name) - %(message)"));
+      QUILL_STRING("%(ascii_time) [%(thread)] %(fileline:<28) LOG_%(level_name) "
+                   "%(logger_name:<12) - %(message)"));
   }
 
   /**
-   * Constructor for a PatterFormater with a custom format
+   * Constructor for a PatterFormatter with a custom format
    * @param format_pattern format_pattern a format string. Must be passed using the macro QUILL_STRING("format string");
    * @param timestamp_format The for format of the date. Same as strftime() format with extra specifiers `%Qms` `%Qus` `Qns`
    * @param timezone The timezone of the timestamp, local_time or gmt_time
@@ -197,7 +198,8 @@ public:
    */
   template <typename... Args>
   void format(std::chrono::nanoseconds timestamp, char const* thread_id, char const* logger_name,
-              detail::LogRecordMetadata const& logline_info, Args const&... args) const;
+              LogMacroMetadata const& logline_info, Args const&... args) const;
+
 #else
   /**
    * Formats the given LogRecord
@@ -212,7 +214,7 @@ public:
   template <typename... Args>
   typename std::enable_if_t<!detail::any_is_same<std::wstring, void, Args...>::value, void> format(
     std::chrono::nanoseconds timestamp, char const* thread_id, char const* logger_name,
-    detail::LogRecordMetadata const& logline_info, Args const&... args) const;
+    LogMacroMetadata const& logline_info, Args const&... args) const;
 
   /**
    * Formats the given LogRecord after converting the wide characters to UTF-8
@@ -227,8 +229,12 @@ public:
   template <typename... Args>
   typename std::enable_if_t<detail::any_is_same<std::wstring, void, Args...>::value, void> format(
     std::chrono::nanoseconds timestamp, char const* thread_id, char const* logger_name,
-    detail::LogRecordMetadata const& logline_info, Args const&... args) const;
+    LogMacroMetadata const& logline_info, Args const&... args) const;
 #endif
+
+  inline void format(std::chrono::nanoseconds timestamp, char const* thread_id,
+                     char const* logger_name, LogMacroMetadata const& logline_info,
+                     fmt::dynamic_format_arg_store<fmt::format_context> const& fmt_arg_store) const;
 
   /**
    * Returns the stored formatted record, to be called after format(...) is called
@@ -241,7 +247,7 @@ private:
    * The stored callback type that will return the appropriate value based on the format pattern specifiers
    */
   using argument_callback_t =
-    std::function<char const*(std::chrono::nanoseconds, char const*, char const*, detail::LogRecordMetadata const&)>;
+    std::function<char const*(std::chrono::nanoseconds, char const*, char const*, LogMacroMetadata const&)>;
 
   /**
    * Generate a tuple of callbacks [](size i) { };
@@ -315,13 +321,13 @@ private:
    * Process part of the pattern and create a helper formatter class
    * @param format_pattern_part format pattern part
    * @throws on invalid input
-   * @return a formater helper base
+   * @return a formatter helper base
    */
   template <size_t N>
   QUILL_NODISCARD std::unique_ptr<FormatterHelperBase> _make_formatter_helper(std::string const& format_pattern_part);
 
   /**
-   * Given a message part generate a vector of callbacks in the excact same order as the format
+   * Given a message part generate a vector of callbacks in the exact same order as the format
    * specifiers in the pattern format string
    * @param pattern pattern
    */
@@ -353,10 +359,16 @@ private:
 #if defined(_WIN32)
   /** Windows support for wide characters, we need to store extra buffers to convert wide strings to utf8 before passing them to fmt format as narrow characters**/
   mutable fmt::wmemory_buffer _w_memory_buffer;
+
+  /** On windows, __FUNCTION__ also contains the namespace name. We replace "::" with "." */
+  std::string _win_func;
 #endif
 
   /** class responsible for formatting the timestamp */
   detail::TimestampFormatter _timestamp_formatter{"%H:%M:%S.%Qns", Timezone::LocalTime};
+
+  /** Only used if %(fileline) is used */
+  std::string _fileline;
 };
 
 /** Inline Implementation **/
@@ -365,25 +377,19 @@ private:
 /***/
 template <typename... Args>
 void PatternFormatter::format(std::chrono::nanoseconds timestamp, const char* thread_id, char const* logger_name,
-                              detail::LogRecordMetadata const& logline_info, Args const&... args) const
+                              LogMacroMetadata const& logline_info, Args const&... args) const
 {
   // clear out existing buffer
   _formatted_log_record.clear();
 
   // Format part 1 of the pattern first
-  if (_pattern_formatter_helper_part_1)
-  {
-    _pattern_formatter_helper_part_1->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
-  }
+  _pattern_formatter_helper_part_1->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
 
   // Format the user requested string
   fmt::format_to(_formatted_log_record, logline_info.message_format(), args...);
 
   // Format part 3 of the pattern
-  if (_pattern_formatter_helper_part_3)
-  {
-    _pattern_formatter_helper_part_3->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
-  }
+  _pattern_formatter_helper_part_3->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
 
   // Append a new line
   _formatted_log_record.push_back('\n');
@@ -393,25 +399,19 @@ void PatternFormatter::format(std::chrono::nanoseconds timestamp, const char* th
 template <typename... Args>
 typename std::enable_if_t<!detail::any_is_same<std::wstring, void, Args...>::value, void> PatternFormatter::format(
   std::chrono::nanoseconds timestamp, const char* thread_id, char const* logger_name,
-  detail::LogRecordMetadata const& logline_info, Args const&... args) const
+  LogMacroMetadata const& logline_info, Args const&... args) const
 {
   // clear out existing buffer
   _formatted_log_record.clear();
 
   // Format part 1 of the pattern first
-  if (_pattern_formatter_helper_part_1)
-  {
-    _pattern_formatter_helper_part_1->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
-  }
+  _pattern_formatter_helper_part_1->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
 
   // Format the user requested string
   fmt::format_to(_formatted_log_record, logline_info.message_format(), args...);
 
   // Format part 3 of the pattern
-  if (_pattern_formatter_helper_part_3)
-  {
-    _pattern_formatter_helper_part_3->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
-  }
+  _pattern_formatter_helper_part_3->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
 
   // Append a new line
   _formatted_log_record.push_back('\n');
@@ -421,16 +421,13 @@ typename std::enable_if_t<!detail::any_is_same<std::wstring, void, Args...>::val
 template <typename... Args>
 typename std::enable_if_t<detail::any_is_same<std::wstring, void, Args...>::value, void> PatternFormatter::format(
   std::chrono::nanoseconds timestamp, char const* thread_id, char const* logger_name,
-  detail::LogRecordMetadata const& logline_info, Args const&... args) const
+  LogMacroMetadata const& logline_info, Args const&... args) const
 {
   // clear out existing buffer
   _formatted_log_record.clear();
 
   // Format part 1 of the pattern first
-  if (_pattern_formatter_helper_part_1)
-  {
-    _pattern_formatter_helper_part_1->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
-  }
+  _pattern_formatter_helper_part_1->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
 
   // Format the user message format string to a wide char buffer
   std::wstring const w_message_format = detail::s2ws(logline_info.message_format());
@@ -443,15 +440,33 @@ typename std::enable_if_t<detail::any_is_same<std::wstring, void, Args...>::valu
   detail::wstring_to_utf8(_w_memory_buffer, _formatted_log_record);
 
   // Format part 3 of the pattern
-  if (_pattern_formatter_helper_part_3)
-  {
-    _pattern_formatter_helper_part_3->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
-  }
+  _pattern_formatter_helper_part_3->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
 
   // Append a new line
   _formatted_log_record.push_back('\n');
 }
 #endif
+
+/***/
+void PatternFormatter::format(std::chrono::nanoseconds timestamp, char const* thread_id,
+                              char const* logger_name, LogMacroMetadata const& logline_info,
+                              fmt::dynamic_format_arg_store<fmt::format_context> const& fmt_arg_store) const
+{
+  // clear out existing buffer
+  _formatted_log_record.clear();
+
+  // Format part 1 of the pattern first
+  _pattern_formatter_helper_part_1->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
+
+  // Format the user requested string
+  fmt::vformat_to(_formatted_log_record, logline_info.message_format(), fmt_arg_store);
+
+  // Format part 3 of the pattern
+  _pattern_formatter_helper_part_3->format(_formatted_log_record, timestamp, thread_id, logger_name, logline_info);
+
+  // Append a new line
+  _formatted_log_record.push_back('\n');
+}
 
 /***/
 template <typename TConstantString>
@@ -550,18 +565,20 @@ std::unique_ptr<PatternFormatter::FormatterHelperBase> PatternFormatter::_make_f
   std::vector<argument_callback_t> const args_callback_collection =
     _generate_vector_of_callbacks(format_pattern_part);
 
-  if (!args_callback_collection.empty())
+  if (args_callback_collection.empty())
   {
-    // Wrap the vector of functions to a tuple for part 1
-    auto const callbacks_tuple =
-      _generate_tuple<N>([args_callback_collection](size_t i) { return args_callback_collection[i]; });
-
-    std::string const fmt_format = _generate_fmt_format_string(format_pattern_part);
-
-    // Store the tuple in a class for part 1
-    return std::make_unique<FormatterHelper<decltype(callbacks_tuple)>>(callbacks_tuple, fmt_format);
+    // create a FormatterHelper but without any callbacks
+    return std::make_unique<FormatterHelper<std::tuple<>>>(std::tuple<>{}, format_pattern_part);
   }
-  return nullptr;
+
+  // Wrap the vector of functions to a tuple for part 1
+  auto const callbacks_tuple =
+    _generate_tuple<N>([args_callback_collection](size_t i) { return args_callback_collection[i]; });
+
+  std::string const fmt_format = _generate_fmt_format_string(format_pattern_part);
+
+  // Store the tuple in a class for part 1
+  return std::make_unique<FormatterHelper<decltype(callbacks_tuple)>>(callbacks_tuple, fmt_format);
 }
 
 } // namespace quill

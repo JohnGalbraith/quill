@@ -1,105 +1,35 @@
 #include "quill/detail/HandlerCollection.h"
-#include "quill/QuillError.h"                   // for QuillError
-#include "quill/detail/misc/Utilities.h"        // for s2ws
-#include "quill/handlers/DailyFileHandler.h"    // for DailyFileHandler
-#include "quill/handlers/FileHandler.h"         // for FileHandler, Filenam...
-#include "quill/handlers/RotatingFileHandler.h" // for RotatingFileHandler
-#include <algorithm>                            // for find_if
-#include <cstdio>                               // for stdout,stderr
-#include <mutex>                                // for lock_guard
-#include <utility>                              // for pair
+#include "quill/QuillError.h"                       // for QuillError
+#include "quill/detail/misc/Utilities.h"            // for s2ws
+#include "quill/handlers/ConsoleHandler.h"          // for ConsoleHandler
+#include <algorithm>                                // for find_if
+#include <cstdio>                                   // for stdout,stderr
+#include <utility>                                  // for pair
 
 namespace quill
 {
 namespace detail
 {
 /***/
-StreamHandler* HandlerCollection::stdout_streamhandler(std::string const& stdout_handler_name /* = std::string{"stdout"} */)
+StreamHandler* HandlerCollection::stdout_console_handler(std::string const& stdout_handler_name /* = std::string{"stdout"} */,
+                                                         ConsoleColours const& console_colours /* = ConsoleColours{} */)
 {
 #if defined(_WIN32)
-  return _create_streamhandler(s2ws(stdout_handler_name), stdout);
+  return _create_console_handler(s2ws(stdout_handler_name), stdout, console_colours);
 #else
-  return _create_streamhandler(stdout_handler_name, stdout);
+  return _create_console_handler(stdout_handler_name, stdout, console_colours);
 #endif
 }
 
 /***/
-StreamHandler* HandlerCollection::stderr_streamhandler(std::string const& stderr_handler_name /* = std::string{"stderr"} */)
+StreamHandler* HandlerCollection::stderr_console_handler(std::string const& stderr_handler_name /* = std::string{"stderr"} */)
 {
+  // we just pass an empty ConsoleColours class, as we don't use colours for stderr.
 #if defined(_WIN32)
-  return _create_streamhandler(s2ws(stderr_handler_name), stderr);
+  return _create_console_handler(s2ws(stderr_handler_name), stderr, quill::ConsoleColours{});
 #else
-  return _create_streamhandler(stderr_handler_name, stderr);
+  return _create_console_handler(stderr_handler_name, stderr, quill::ConsoleColours{});
 #endif
-}
-
-/***/
-StreamHandler* HandlerCollection::file_handler(filename_t const& filename,
-                                               std::string const& mode /* = std::string{"a"} */,
-                                               FilenameAppend append_to_filename /* = FilenameAppend::None */)
-{
-  // Protect shared access
-  std::lock_guard<Spinlock> const lock{_spinlock};
-
-  // Try to insert it unless we failed it means we already had it
-  auto const search = _file_handler_collection.find(filename);
-
-  // First search if we have it and don't call make_unique yet as this will call fopen
-  if (search != _file_handler_collection.cend())
-  {
-    return (*search).second.get();
-  }
-
-  // if first time add it
-  auto emplace_result = _file_handler_collection.emplace(
-    filename, std::make_unique<FileHandler>(filename.data(), mode.data(), append_to_filename));
-
-  return (*emplace_result.first).second.get();
-}
-
-/***/
-StreamHandler* HandlerCollection::daily_file_handler(filename_t const& base_filename, std::chrono::hours rotation_hour,
-                                                     std::chrono::minutes rotation_minute)
-{
-  // Protect shared access
-  std::lock_guard<Spinlock> const lock{_spinlock};
-
-  // Try to insert it unless we failed it means we already had it
-  auto const search = _file_handler_collection.find(base_filename);
-
-  // First search if we have it and don't call make_unique yet as this will call fopen
-  if (search != _file_handler_collection.cend())
-  {
-    return (*search).second.get();
-  }
-
-  // if first time add it
-  auto emplace_result = _file_handler_collection.emplace(
-    base_filename, std::make_unique<DailyFileHandler>(base_filename.data(), rotation_hour, rotation_minute));
-
-  return (*emplace_result.first).second.get();
-}
-
-/***/
-StreamHandler* HandlerCollection::rotating_file_handler(filename_t const& base_filename, size_t max_file_size)
-{
-  // Protect shared access
-  std::lock_guard<Spinlock> const lock{_spinlock};
-
-  // Try to insert it unless we failed it means we already had it
-  auto const search = _file_handler_collection.find(base_filename);
-
-  // First search if we have it and don't call make_unique yet as this will call fopen
-  if (search != _file_handler_collection.cend())
-  {
-    return (*search).second.get();
-  }
-
-  // if first time add it
-  auto emplace_result = _file_handler_collection.emplace(
-    base_filename, std::make_unique<RotatingFileHandler>(base_filename.data(), max_file_size));
-
-  return (*emplace_result.first).second.get();
 }
 
 /***/
@@ -134,46 +64,50 @@ std::vector<Handler*> HandlerCollection::active_handlers() const
 }
 
 /***/
-StreamHandler* HandlerCollection::_create_streamhandler(filename_t const& stream, FILE* file)
+StreamHandler* HandlerCollection::_create_console_handler(filename_t const& stream, FILE* file,
+                                                          ConsoleColours const& console_colours)
 {
   // Protect shared access
   std::lock_guard<Spinlock> const lock{_spinlock};
 
   // Try to insert it unless we failed it means we already had it
-  auto const search = _file_handler_collection.find(stream);
+  auto const search = _handler_collection.find(stream);
 
   // First search if we have it and don't call make_unique yet as this will call fopen
-  if (search != _file_handler_collection.cend())
+  if (search != _handler_collection.cend())
   {
+    // since we found a similar handler we assume that it derives from StreamHandler
+    auto handler = reinterpret_cast<StreamHandler*>(search->second.get());
+
     // if the handler with that name was already created check that the user didn't try to create it
     // again passing a different file
-    if (file == stdout && (search->second->stream_handler_type() != StreamHandler::StreamHandlerType::Stdout))
+    if (file == stdout && (handler->stream_handler_type() != StreamHandler::StreamHandlerType::Stdout))
     {
-      throw QuillError(
+      QUILL_THROW(QuillError(
         "Trying to insert an stdout handler again, but the handler already exists as a different "
-        "file. Use an unique stream_handler name");
+        "file. Use an unique stream_handler name"));
     }
-    else if (file == stderr && (search->second->stream_handler_type() != StreamHandler::StreamHandlerType::Stderr))
+    else if (file == stderr && (handler->stream_handler_type() != StreamHandler::StreamHandlerType::Stderr))
     {
-      throw QuillError(
+      QUILL_THROW(QuillError(
         "Trying to insert an stderr handler again, but the handler already exists as a different "
-        "file. Use an unique stream_handler name");
+        "file. Use an unique stream_handler name"));
     }
-    else if (search->second->stream_handler_type() == StreamHandler::StreamHandlerType::File)
+    else if (handler->stream_handler_type() == StreamHandler::StreamHandlerType::File)
     {
-      throw QuillError(
+      QUILL_THROW(QuillError(
         "Trying to insert an stdout/stderr handler, but the handler already exists. Use an unique "
-        "stream_handler name");
+        "stream_handler name"));
     }
 
-    return (*search).second.get();
+    return handler;
   }
 
   // if first time add it
   auto emplace_result =
-    _file_handler_collection.emplace(stream, std::make_unique<StreamHandler>(stream, file));
+    _handler_collection.emplace(stream, std::make_unique<ConsoleHandler>(stream, file, console_colours));
 
-  return (*emplace_result.first).second.get();
+  return reinterpret_cast<StreamHandler*>((*emplace_result.first).second.get());
 }
 } // namespace detail
 } // namespace quill

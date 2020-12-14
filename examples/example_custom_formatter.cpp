@@ -6,9 +6,6 @@
 
 int main()
 {
-  // Start the backend logging thread
-  quill::start();
-
   // Get the stdout file handler
   quill::Handler* file_handler = quill::stdout_handler();
 
@@ -17,8 +14,13 @@ int main()
     QUILL_STRING("%(ascii_time) [%(process)] [%(thread)] %(logger_name) - %(message)"), // log recorder format
     "%D %H:%M:%S.%Qms %z",     // timestamp format
     quill::Timezone::GmtTime); // timestamp's timezone
+
   // This line sets the default logger's handler to be the new handler with the custom format string
   quill::set_default_logger_handler(file_handler);
+
+  // Start the backend logging thread
+  // quill::set_default_logger_handler MUST be called before the backend worker thread starts
+  quill::start();
 
   // Log using the default logger
   LOG_INFO(quill::get_logger(), "The default logger is using a custom format");

@@ -24,8 +24,16 @@ std::vector<PatternFormatter::argument_callback_t> PatternFormatter::_generate_v
       }
 
       // We have everything, get the substring
-      std::string const pattern_attr =
-        pattern.substr(open_paren_pos + 1, closed_paren_pos - open_paren_pos - 1);
+      std::string pattern_attr = pattern.substr(open_paren_pos + 1, closed_paren_pos - open_paren_pos - 1);
+
+      // find any user format specifiers
+      size_t const pos = pattern_attr.find(':');
+
+      if (pos != std::string::npos)
+      {
+        // we found user format specifiers that we need to remove before we pass the pattern_attr
+        pattern_attr = pattern_attr.substr(0, pos);
+      }
 
       // Add the function to the vector
       callback_collection.emplace_back(_select_argument_callback(pattern_attr));
@@ -50,50 +58,77 @@ PatternFormatter::argument_callback_t PatternFormatter::_select_argument_callbac
 
   if (pattern_attr == "ascii_time")
   {
-    return [this](std::chrono::nanoseconds timestamp, char const*, char const*, detail::LogRecordMetadata const&) {
+    return [this](std::chrono::nanoseconds timestamp, char const*, char const*, LogMacroMetadata const&) {
       return _timestamp_formatter.format_timestamp(timestamp);
     };
   }
   else if (pattern_attr == "thread")
   {
     return [](std::chrono::nanoseconds, char const* thread_id, char const*,
-              detail::LogRecordMetadata const&) { return thread_id; };
+              LogMacroMetadata const&) { return thread_id; };
   }
   else if (pattern_attr == "process")
   {
-    return [](std::chrono::nanoseconds, char const*, char const*, detail::LogRecordMetadata const&) {
+    return [](std::chrono::nanoseconds, char const*, char const*, LogMacroMetadata const&) {
       return detail::LogManagerSingleton::instance().log_manager().process_id().data();
     };
   }
   else if (pattern_attr == "pathname")
   {
     return [](std::chrono::nanoseconds, char const*, char const*,
-              detail::LogRecordMetadata const& logline_info) { return logline_info.pathname(); };
+              LogMacroMetadata const& logline_info) { return logline_info.pathname(); };
   }
   else if (pattern_attr == "filename")
   {
     return [](std::chrono::nanoseconds, char const*, char const*,
-              detail::LogRecordMetadata const& logline_info) { return logline_info.filename(); };
+              LogMacroMetadata const& logline_info) { return logline_info.filename(); };
   }
   else if (pattern_attr == "lineno")
   {
     return [](std::chrono::nanoseconds, char const*, char const*,
-              detail::LogRecordMetadata const& logline_info) { return logline_info.lineno(); };
+              LogMacroMetadata const& logline_info) { return logline_info.lineno(); };
+  }
+  else if (pattern_attr == "fileline")
+  {
+    return [this](std::chrono::nanoseconds, char const*, char const*, LogMacroMetadata const& logline_info) {
+      _fileline.clear();
+      _fileline += logline_info.filename();
+      _fileline += ":";
+      _fileline += logline_info.lineno();
+      return _fileline.data();
+    };
   }
   else if (pattern_attr == "level_name")
   {
     return [](std::chrono::nanoseconds, char const*, char const*,
-              detail::LogRecordMetadata const& logline_info) { return logline_info.level_as_str(); };
+              LogMacroMetadata const& logline_info) { return logline_info.level_as_str(); };
   }
   else if (pattern_attr == "logger_name")
   {
     return [](std::chrono::nanoseconds, char const*, char const* logger_name,
-              detail::LogRecordMetadata const&) { return logger_name; };
+              LogMacroMetadata const&) { return logger_name; };
   }
   else if (pattern_attr == "function_name")
   {
+#if defined(_WIN32)
+    return [this](std::chrono::nanoseconds, char const*, char const*, LogMacroMetadata const& logline_info) {
+      // On windows, __FUNCTION__ also contains the namespace name e.g. a::b::my_function().
+      _win_func = logline_info.func();
+
+      // replace all "::" with '.'
+      size_t index = _win_func.find("::");
+      while (index != std::string::npos)
+      {
+        _win_func.replace(index, 2, ".");
+        index = _win_func.find("::");
+      }
+
+      return _win_func.data();
+    };
+#else
     return [](std::chrono::nanoseconds, char const*, char const*,
-              detail::LogRecordMetadata const& logline_info) { return logline_info.func(); };
+              LogMacroMetadata const& logline_info) { return logline_info.func(); };
+#endif
   }
   else
   {
@@ -122,8 +157,30 @@ std::string PatternFormatter::_generate_fmt_format_string(std::string pattern)
       std::string const pattern_attr =
         pattern.substr(arg_identifier_pos, (closed_paren_pos + 1) - arg_identifier_pos);
 
-      // Make the replacement.
-      pattern.replace(arg_identifier_pos, pattern_attr.length(), "{}");
+      // find any user format specifiers
+      size_t const pos = pattern_attr.find(':');
+
+      if (pos != std::string::npos)
+      {
+        // we found user format specifiers that we want to keep.
+        // e.g. %(fileline:<32)
+        std::string custom_format_specifier = pattern_attr.substr(pos);
+        custom_format_specifier.pop_back(); // remove ")"
+
+        // replace with the pattern with the correct value
+        std::string value;
+        value += "{";
+        value += custom_format_specifier;
+        value += "}";
+
+        // e.g. {:<32}
+        pattern.replace(arg_identifier_pos, pattern_attr.length(), value);
+      }
+      else
+      {
+        // Make the replacement.
+        pattern.replace(arg_identifier_pos, pattern_attr.length(), "{}");
+      }
 
       // Look for the next pattern to replace
       arg_identifier_pos = pattern.find_first_of('%');
